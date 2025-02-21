@@ -51,7 +51,7 @@ absltest.TestCase methods aren't statically available here, only once mixed in.
 
 from absl import logging
 import dm_env
-import tree
+import collections.abc
 from dm_env import _abstract_test_mixin
 _STEP_NEW_ENV_MUST_RETURN_FIRST = (
     "calling step() on a fresh environment must produce a step with "
@@ -68,6 +68,44 @@ _FIRST_MUST_ONLY_COME_AFTER_LAST = (
     "step() must only produce a FIRST step after a LAST step "
     "or on a fresh environment.")
 
+def _assert_same_structure(first, second):
+    """Asserts that two nested structures have the same structure."""
+    if isinstance(first, (tuple, list)) and isinstance(second, (tuple, list)):
+        if len(first) != len(second):
+            raise ValueError("Structures have different lengths")
+        for f, s in zip(first, second):
+            _assert_same_structure(f, s)
+    elif isinstance(first, dict) and isinstance(second, dict):
+        if first.keys() != second.keys():
+            raise ValueError("Structures have different keys")
+        for key in first:
+            _assert_same_structure(first[key], second[key])
+    elif (isinstance(first, (tuple, list, dict)) != 
+          isinstance(second, (tuple, list, dict))):
+        raise ValueError("Structures are different types")
+
+def _map_structure(func, structure):
+    """Maps a function over a nested structure."""
+    if isinstance(structure, (list, tuple)):
+        return type(structure)(_map_structure(func, x) for x in structure)
+    elif isinstance(structure, dict):
+        return {k: _map_structure(func, v) for k, v in structure.items()}
+    else:
+        return func(structure)
+
+def _map_structure_with_path(func, structure, spec):
+    """Maps a function over a nested structure while tracking the path."""
+    def helper(path, struct, spec):
+        if isinstance(struct, (list, tuple)):
+            return type(struct)(
+                helper(path + [i], x, s) 
+                for i, (x, s) in enumerate(zip(struct, spec)))
+        elif isinstance(struct, dict):
+            return {k: helper(path + [k], struct[k], spec[k]) 
+                   for k in struct}
+        else:
+            return func(path, struct, spec)
+    return helper([], structure, spec)
 
 class EnvironmentTestMixin(_abstract_test_mixin.TestMixin):
   """Mixin to help test implementations of `dm_env.Environment`.
@@ -103,7 +141,7 @@ class EnvironmentTestMixin(_abstract_test_mixin.TestMixin):
   def make_action(self):
     """Returns a single action conforming to the environment's action_spec()."""
     spec = self.environment.action_spec()
-    return tree.map_structure(lambda s: s.generate_value(), spec)
+    return _map_structure(lambda s: s.generate_value(), spec)
 
   def reset_environment(self):
     """Resets the environment and checks that the returned TimeStep is valid.
@@ -155,23 +193,18 @@ class EnvironmentTestMixin(_abstract_test_mixin.TestMixin):
     # pytype: enable=attribute-error
 
   def assertConformsToSpec(self, value, spec):
-    """Checks that `value` conforms to `spec`.
-
-    Args:
-      value: A potentially nested structure of numpy arrays or scalars.
-      spec: A potentially nested structure of `specs.Array` instances.
-    """
+    """Checks that `value` conforms to `spec`."""
     try:
-      tree.assert_same_structure(value, spec)
-    except (TypeError, ValueError) as e:
-      self.fail("`spec` and `value` have mismatching structures: {}".format(e))  # pytype: disable=attribute-error
+        _assert_same_structure(value, spec)
+    except ValueError as e:
+        self.fail("`spec` and `value` have mismatching structures: {}".format(e))
     def validate(path, item, array_spec):
-      try:
-        return array_spec.validate(item)
-      except ValueError as e:
-        raise ValueError("Value at path {!r} failed validation: {}."
-                         .format("/".join(map(str, path)), e))
-    tree.map_structure_with_path(validate, value, spec)
+        try:
+            return array_spec.validate(item)
+        except ValueError as e:
+            raise ValueError("Value at path {!r} failed validation: {}."
+                           .format("/".join(map(str, path)), e))
+    _map_structure_with_path(validate, value, spec)
 
   def assertValidObservation(self, observation):
     """Checks that `observation` conforms to the `observation_spec()`."""

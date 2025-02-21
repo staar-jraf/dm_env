@@ -39,7 +39,6 @@ setup(
     python_requires='>=3.7',
     install_requires=[
         'absl-py',
-        'dm-tree',
         'numpy',
     ],
     tests_require=[
